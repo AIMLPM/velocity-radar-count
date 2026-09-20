@@ -22,7 +22,17 @@ Since the second release, three summaries as well, worked out inside the first j
 - **Day, evening, overnight.** Only if you give your time zone in your own file, because GitHub reports commit times in UTC: the share of substantive commits from 07:00 to 18:00, 18:00 to 23:00 and 23:00 to 07:00.
 - **Commit size.** The median lines of a substantive commit in all the repositories read against your public ones.
 
-No list of commit times is handed on. The only times in the summaries are where your three longest runs and stretches begin and end.
+No list of commit times is handed on. The only times in the summaries are where your longest run and your longest stretch begin and end.
+
+## How the file is laid out
+
+The first job's code has five numbered sections, and every function says what it does in its first line:
+
+1. **Settings.** The two classifier patterns, copied from Velocity Radar's locked formulas, and the few numbers the rest uses.
+2. **Reading from GitHub.** The two queries, written out in full, and the functions that send them. This is the only place the token is used and the only place anything is asked of GitHub.
+3. **Adding up.** Totals by day, the table for the last 30, 90, 180 and 365 days, the longest run and stretch, the hours of the day.
+4. **Showing you the result.** The page you see is drawn straight from the totals, so it cannot show something the totals do not hold.
+5. **The run.** One function that calls the others in order.
 
 ## Why two jobs
 

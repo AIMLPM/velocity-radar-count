@@ -1,28 +1,27 @@
 # Velocity Radar count. This one file is all of the code that runs in your account.
 #
-# What it does: asks GitHub for the commits YOU authored on the default branch of the repositories your
-# token can read, and adds them up by day. For each commit it asks for five things only: its id, its date,
-# the first line of its message, how many lines it added and removed, and how many parents it has.
-# It never asks for a file, a diff or a full commit message, and it uses no outside actions or packages.
+# WHAT IT ASKS GITHUB FOR. The commits YOU authored on the default branch of the repositories your token can
+# read. For each commit, five things: its id, its date, the first line of its message, the lines it added and
+# removed, and how many parents it has. Never a file, a diff, a full message or anyone else's commits.
 #
-# What leaves the first job: totals by day, and three small summaries of WHEN and HOW BIG (the longest unbroken
-# run of hours that each hold a commit, how many hours of a day hold one, and the median size of a commit in all
-# your repositories against your public ones). No repository names, no commit ids, no message text, and no list of
-# commit times: the times are used inside the first job, and the only times handed on are where your three longest
-# runs and stretches begin and end.
-# What leaves your account today: NOTHING. Sending is not open yet; the second job only shows the totals
-# and shows what GitHub would vouch for about this run. When sending opens it will be a new released
-# version of this file, and you would have to change the pinned commit id in your own file to use it.
+# WHAT LEAVES YOUR ACCOUNT TODAY. Nothing. Sending is not open yet. The totals are shown in your own run.
+# When sending opens it will be a new release of this file, and you would have to change the commit id in
+# your own file to use it.
 #
-# Two jobs on purpose. "count" holds your token and has no way to ask GitHub for a signed run token.
-# "witness" can ask for that signed run token and never sees your token.
+# WHAT JOB 1 HANDS TO JOB 2. Totals by day, a table for the last 30, 90, 180 and 365 days, your longest run
+# and longest stretch of commits, and how your commits spread over the hours of the day. No repository
+# names, no commit ids, no message text. The only commit times handed on are where your longest run and
+# longest stretch begin and end.
+#
+# WHY TWO JOBS. "count" holds your token and has no permission to ask GitHub for a signed run token.
+# "witness" can ask for that signed token and never sees yours. It uses no outside actions and no packages.
 name: Velocity Radar count
 
 on:
   workflow_call:
     inputs:
       timezone:
-        description: Optional. Your time zone, such as America/Los_Angeles, for the day, evening and overnight split. GitHub reports commit times in UTC only.
+        description: Optional. A region name such as America/Los_Angeles. GitHub reports commit times in UTC only.
         type: string
         required: false
         default: ""
@@ -40,238 +39,314 @@ jobs:
       totals: ${{ steps.count.outputs.totals }}
     steps:
       - id: count
-        name: Add up commits by day
+        name: Add up your commits
         env:
           RADAR_TOKEN: ${{ secrets.RADAR_TOKEN }}
           TIMEZONE: ${{ inputs.timezone }}
         run: |
           python3 - <<'PY'
-          import base64, collections, datetime as dt, gzip, json, os, re, statistics, sys, time, urllib.error, urllib.request
+          import base64, collections, datetime as dt, gzip, json, os, re, statistics, sys, time
+          import urllib.error, urllib.request
+          from zoneinfo import ZoneInfo
 
-          METHOD_VERSION = 3          # the classifier below is the one in Velocity Radar's locked measures.py, version 3
+          # ---- 1. SETTINGS ------------------------------------------------------------------------------
+          # The two patterns are copied, character for character, from Velocity Radar's locked measures.py.
+          METHOD_VERSION = 3
           AUTO = re.compile(r"^(chore|build|ci|release|bump|deploy|sync|publish|version|merge|revert|update (readme|deps|dependencies|changelog|lock)|\[?bot\]?|auto|evidence|logs?[:/]|test-?runs?|record(ed)? (run|evidence)|apply (formatting|prettier|fmt)|regenerat|prepare release|v?\d+\.\d+\.\d+)", re.I)
           MICRO = re.compile(r"^(wip|x+|\.+|fix|update|tweak|tmp|test|stuff|more|misc|changes?|save)$", re.I)
-          DAYS_BACK = 730
+          KINDS = ("substantive", "merge", "automated", "micro")
+          DAYS_BACK = 730                           # how far back commits are read
+          WINDOWS = (30, 90, 180, 365)              # the table covers these many days
+          LONGEST_BREAK = dt.timedelta(hours=2)     # a stretch ends when no commit lands for longer than this
+          OVERNIGHT = (23, 0, 1, 2, 3, 4, 5, 6)
+          BANDS = {"day, 07:00 to 18:00": range(7, 18), "evening, 18:00 to 23:00": range(18, 23),
+                   "overnight, 23:00 to 07:00": OVERNIGHT}
+          HOUR = dt.timedelta(hours=1)
+          CHART_ONLY = ("per_hour", "first_hour_of_day")    # handed on so a chart can be drawn, left out of the tables
+          TOKEN = os.environ.get("RADAR_TOKEN") or sys.exit("RADAR_TOKEN is empty: add the token as a secret with that name")
+          Commit = collections.namedtuple("Commit", "day kind lines when private")
 
-          def kind(is_merge, subject):
-              s = (subject or "").strip()
-              if is_merge: return "m"                      # merge commit
-              if AUTO.search(s): return "a"                # automated by its subject line: chores, releases, test records
-              if len(s) <= 3 or MICRO.match(s): return "u"  # micro: "wip", "fix", "."
-              return "s"                                   # everything else
-
-          TOKEN = os.environ.get("RADAR_TOKEN") or sys.exit("RADAR_TOKEN is empty: add the token as a repository secret with that name")
-
-          def ask(query, **variables):
-              body = json.dumps({"query": query, "variables": variables}).encode()
-              for attempt in range(5):
-                  req = urllib.request.Request("https://api.github.com/graphql", data=body,
-                                               headers={"Authorization": "Bearer " + TOKEN, "User-Agent": "velocity-radar-count"})
-                  try:
-                      with urllib.request.urlopen(req, timeout=90) as r: out = json.load(r)
-                  except urllib.error.HTTPError as e:
-                      if e.code in (401, 403) and attempt == 0 and "rate limit" not in (e.read() or b"").decode("utf8", "replace").lower():
-                          sys.exit(f"GitHub refused the token (HTTP {e.code}). Check that it has not expired and has Contents: Read-only.")
-                      time.sleep(15 * (attempt + 1)); continue
-                  except Exception:
-                      time.sleep(15 * (attempt + 1)); continue
-                  if out.get("data") is not None: return out["data"], out.get("errors")
-                  time.sleep(15 * (attempt + 1))
-              return None, [{"message": "no answer after five tries"}]
-
-          me, err = ask("{ viewer { id login } }")
-          if not me: sys.exit(f"could not read the token's owner: {err}")
-          uid, login = me["viewer"]["id"], me["viewer"]["login"]
-
-          REPOS = """query($after:String){ viewer { repositories(first:100, after:$after, ownerAffiliations:OWNER, isFork:false) {
-            pageInfo{ hasNextPage endCursor } nodes{ nameWithOwner isPrivate defaultBranchRef{ name } } } } }"""
+          # ---- 2. READING FROM GITHUB -------------------------------------------------------------------
+          REPOSITORIES = """query($after:String){ viewer { repositories(first:100, after:$after,
+            ownerAffiliations:OWNER, isFork:false) { pageInfo{ hasNextPage endCursor }
+            nodes{ nameWithOwner isPrivate defaultBranchRef{ name } } } } }"""
           HISTORY = """query($owner:String!,$name:String!,$uid:ID!,$since:GitTimestamp!,$after:String){
             repository(owner:$owner,name:$name){ defaultBranchRef{ target{ ... on Commit {
               history(first:100, author:{id:$uid}, since:$since, after:$after){ pageInfo{ hasNextPage endCursor }
                 nodes{ oid authoredDate messageHeadline SIZES parents{ totalCount } } } } } } } }"""
 
-          repos, after = [], None
-          while True:
-              d, err = ask(REPOS, after=after)
-              if not d: sys.exit(f"could not list repositories: {err}")
-              page = d["viewer"]["repositories"]; repos += [r for r in page["nodes"] if r.get("defaultBranchRef")]
-              if not page["pageInfo"]["hasNextPage"]: break
-              after = page["pageInfo"]["endCursor"]
+          def ask(query, **variables):
+              """One request to GitHub with your token. Returns the data, or None after five failed tries."""
+              request = urllib.request.Request(
+                  "https://api.github.com/graphql",
+                  data=json.dumps({"query": query, "variables": variables}).encode(),
+                  headers={"Authorization": "Bearer " + TOKEN, "User-Agent": "velocity-radar-count"})
+              for attempt in range(5):
+                  try:
+                      with urllib.request.urlopen(request, timeout=90) as response:
+                          data = json.load(response).get("data")
+                      if data is not None:
+                          return data
+                  except urllib.error.HTTPError as error:
+                      if error.code == 401:
+                          sys.exit("GitHub refused the token: check it has not expired and has Contents: Read-only.")
+                  except Exception:
+                      pass                          # a dropped connection or a busy server: wait and try again
+                  time.sleep(15 * (attempt + 1))
+              return None
 
-          today = dt.datetime.now(dt.timezone.utc).date(); through = today - dt.timedelta(days=1)      # complete days only
-          since = (today - dt.timedelta(days=DAYS_BACK)).isoformat() + "T00:00:00Z"
-          seen, unread = {}, 0
-          for r in repos:
-              owner, name = r["nameWithOwner"].split("/", 1); after = None; with_sizes = True
+          def repositories():
+              """Every repository you own that the token can read. Forks and empty repositories are left out."""
+              found, after = [], None
               while True:
-                  d, err = ask(HISTORY.replace("SIZES", "additions deletions" if with_sizes else ""), owner=owner, name=name, uid=uid, since=since, after=after)
-                  if not d and with_sizes: with_sizes = False; continue        # a very large repository: read it again without line counts
-                  if not d: unread += 1; break
-                  h = ((((d.get("repository") or {}).get("defaultBranchRef") or {}).get("target") or {}).get("history")) or {}
-                  for n in h.get("nodes") or []:
-                      if n["oid"] in seen: continue                             # the same commit in two repositories counts once
-                      day = dt.datetime.fromisoformat(n["authoredDate"].replace("Z", "+00:00")).astimezone(dt.timezone.utc).date()
-                      size = None if n.get("additions") is None else n["additions"] + n["deletions"]
-                      when = dt.datetime.fromisoformat(n["authoredDate"].replace("Z", "+00:00")).astimezone(dt.timezone.utc)
-                      seen[n["oid"]] = (day.isoformat(), kind(n["parents"]["totalCount"] > 1, n.get("messageHeadline")), size, when, r["isPrivate"])
-                  if not (h.get("pageInfo") or {}).get("hasNextPage"): break
-                  after = h["pageInfo"]["endCursor"]
+                  data = ask(REPOSITORIES, after=after) or sys.exit("could not list your repositories")
+                  page = data["viewer"]["repositories"]
+                  found += [r for r in page["nodes"] if r["defaultBranchRef"]]
+                  if not page["pageInfo"]["hasNextPage"]:
+                      return found
+                  after = page["pageInfo"]["endCursor"]
 
-          days = collections.defaultdict(lambda: {"s": 0, "m": 0, "a": 0, "u": 0, "lines": []})
-          for day, k, size, when, private in seen.values():
-              if day > through.isoformat(): continue
-              days[day][k] += 1
-              if k == "s" and size is not None: days[day]["lines"].append(size)
-          for v in days.values(): v["lines"].sort()
+          def commits_in(repository, author_id, since):
+              """Your commits on one repository's default branch. None if the repository could not be read."""
+              owner, name = repository["nameWithOwner"].split("/", 1)
+              found, after, sizes = [], None, "additions deletions"
+              while True:
+                  data = ask(HISTORY.replace("SIZES", sizes), owner=owner, name=name, uid=author_id, since=since,
+                             after=after)
+                  if data is None and sizes:
+                      sizes = ""                    # a very large repository: read it again without line counts
+                      continue
+                  if data is None:
+                      return None
+                  branch = (data["repository"] or {}).get("defaultBranchRef") or {}
+                  history = (branch.get("target") or {}).get("history") or {}
+                  found += history.get("nodes") or []
+                  if not (history.get("pageInfo") or {}).get("hasNextPage"):
+                      return found
+                  after = history["pageInfo"]["endCursor"]
 
-          # ---- when and how big: the last 365 complete days. Times stay in this job; only these summaries go on.
-          year_start = (through - dt.timedelta(days=364)).isoformat()
-          year = [c for c in seen.values() if year_start <= c[0] <= through.isoformat()]
-          zone = None
-          if os.environ.get("TIMEZONE", "").strip():
+          def kind(is_merge, subject):
+              """Sorts a commit by its parent count and the first line of its message, and by nothing else."""
+              text = (subject or "").strip()
+              if is_merge:
+                  return "merge"
+              if AUTO.search(text):
+                  return "automated"                # chores, releases, version bumps, recorded test runs
+              if len(text) <= 3 or MICRO.match(text):
+                  return "micro"                    # "wip", "fix", "."
+              return "substantive"
+
+          def read_commits(through):
+              """Your commits up to the last complete day. A commit that sits in two repositories counts once."""
+              me = ask("{ viewer { id login } }") or sys.exit("could not read who the token belongs to")
+              since = (through - dt.timedelta(days=DAYS_BACK - 1)).isoformat() + "T00:00:00Z"
+              repos, commits, unread = repositories(), {}, 0
+              for repo in repos:
+                  nodes = commits_in(repo, me["viewer"]["id"], since)
+                  if nodes is None:
+                      unread += 1
+                      continue
+                  for node in nodes:
+                      when = dt.datetime.fromisoformat(node["authoredDate"].replace("Z", "+00:00")).astimezone(dt.timezone.utc)
+                      lines = None if node.get("additions") is None else node["additions"] + node["deletions"]
+                      is_merge = node["parents"]["totalCount"] > 1
+                      commits.setdefault(node["oid"], Commit(when.date().isoformat(), kind(is_merge, node["messageHeadline"]),
+                                                             lines, when, repo["isPrivate"]))
+              counted = {"read": len(repos) - unread, "private": sum(r["isPrivate"] for r in repos), "could_not_read": unread}
+              kept = [c for c in commits.values() if c.day <= through.isoformat()]
+              return me["viewer"]["login"], since[:10], kept, counted
+
+          # ---- 3. ADDING UP -----------------------------------------------------------------------------
+          def median_lines(commits):
+              """The size in lines of the middle commit, or None with fewer than ten commits to go on."""
+              lines = [c.lines for c in commits if c.lines is not None]
+              return round(statistics.median(lines)) if len(lines) >= 10 else None
+
+          def totals_by_day(commits):
+              """For each day: how many commits of each kind, and the line count of each substantive commit."""
+              days = collections.defaultdict(lambda: dict({k: 0 for k in KINDS}, lines=[]))
+              for c in commits:
+                  days[c.day][c.kind] += 1
+                  if c.kind == "substantive" and c.lines is not None:
+                      days[c.day]["lines"].append(c.lines)
+              return {day: dict(total, lines=sorted(total["lines"])) for day, total in sorted(days.items())}
+
+          def window_table(commits, through):
+              """One row for each of the last 30, 90, 180 and 365 days, with commit size in all repositories and public ones."""
+              rows = []
+              for span in WINDOWS:
+                  first_day = (through - dt.timedelta(days=span - 1)).isoformat()
+                  inside = [c for c in commits if c.day >= first_day]
+                  substantive = [c for c in inside if c.kind == "substantive"]
+                  public = [c for c in substantive if not c.private]
+                  rows.append({"days": span, "commits": len(inside), **{k: sum(c.kind == k for c in inside) for k in KINDS},
+                               "median_lines": median_lines(substantive), "public_substantive": len(public),
+                               "median_lines_public_only": median_lines(public)})
+              return rows
+
+          def longest_chain(times, longest_gap):
+              """The first and last of the longest chain of times in which no gap between neighbours exceeds longest_gap."""
+              times = sorted(times)
+              best, start = (times[0], times[0]), times[0]
+              for earlier, later in zip(times, times[1:] + [None]):
+                  if later is None or later - earlier > longest_gap:
+                      if earlier - start > best[1] - best[0]:
+                          best = (start, earlier)
+                      start = later
+              return best
+
+          def longest_run(commits, clock):
+              """The longest unbroken run of clock hours that each hold at least one commit."""
+              per_hour = collections.Counter(c.when.replace(minute=0, second=0, microsecond=0) for c in commits)
+              first, last = longest_chain(per_hour, HOUR)
+              each = [per_hour[first + HOUR * i] for i in range(int((last - first) / HOUR) + 1)]
+              return {"hours": len(each), "from": clock(first).strftime("%Y-%m-%d %H:%M"),
+                      "to": clock(last + HOUR).strftime("%Y-%m-%d %H:%M"), "commits": sum(each), "fewest_in_an_hour": min(each),
+                      "median_in_an_hour": statistics.median(each), "first_hour_of_day": clock(first).hour, "per_hour": each[:120]}
+
+          def longest_stretch(commits, clock):
+              """The longest stretch of commits with no break longer than LONGEST_BREAK between one and the next."""
+              times = sorted(c.when for c in commits)
+              first, last = longest_chain(times, LONGEST_BREAK)
+              inside = [t for t in times if first <= t <= last]
+              longest_break = max((later - earlier for earlier, later in zip(inside, inside[1:])), default=dt.timedelta(0))
+              return {"hours": round((last - first) / HOUR, 1), "from": clock(first).strftime("%Y-%m-%d %H:%M"),
+                      "to": clock(last).strftime("%Y-%m-%d %H:%M"), "commits": len(inside),
+                      "longest_break_minutes": round(longest_break / dt.timedelta(minutes=1))}
+
+          def hours_of_the_day(commits, clock, zone_given):
+              """On how many days commits landed in many different hours; with a time zone, also the bands and the nights."""
+              hours_by_day, hours_by_night = collections.defaultdict(set), collections.defaultdict(set)
+              by_hour = collections.Counter()
+              for c in commits:
+                  local = clock(c.when)
+                  by_hour[local.hour] += 1
+                  hours_by_day[local.date()].add(local.hour)
+                  if local.hour in OVERNIGHT:       # 23:00 opens the night of that day; 00:00 to 06:59 close the night before
+                      night = local.date() if local.hour == 23 else local.date() - dt.timedelta(days=1)
+                      hours_by_night[night].add(local.hour)
+              spread = [len(hours) for hours in hours_by_day.values()]
+              result = {"days": len(spread), "median_hours_a_day": statistics.median(spread),
+                        "days_with_at_least": {str(n): sum(s >= n for s in spread) for n in (8, 12, 16, 20, 24)}}
+              if zone_given:
+                  result["bands"] = []
+                  for band, hours in BANDS.items():
+                      share = 100 * sum(by_hour[h] for h in hours) / len(commits)
+                      result["bands"].append({"band": band, "commits": sum(by_hour[h] for h in hours),
+                                              "percent_of_commits": round(share, 1),
+                                              "percent_per_hour_of_the_band": round(share / len(hours), 2)})
+                  result["nights"] = {"nights_with_a_commit": len(hours_by_night),
+                                      "with_one_in_4_or_more_of_the_8_hours": sum(len(h) >= 4 for h in hours_by_night.values()),
+                                      "with_one_in_all_8_hours": sum(len(h) == 8 for h in hours_by_night.values())}
+              return result
+
+          # ---- 4. SHOWING YOU THE RESULT ----------------------------------------------------------------
+          def table(rows):
+              """A Markdown table drawn straight from a list of records, so the page shows exactly what is in the totals."""
+              def cell(value):
+                  return "" if value is None else f"{value:,}" if isinstance(value, int) else str(value)
+              columns = list(dict.fromkeys(name for row in rows for name in row))
+              lines = ["", "| " + " | ".join(name.replace("_", " ") for name in columns) + " |", "|" + "---|" * len(columns)]
+              return lines + ["| " + " | ".join(cell(row.get(name)) for name in columns) + " |" for row in rows]
+
+          def summary(totals):
+              """The page you see when the run finishes. Everything on it is also in the totals handed to job 2."""
+              counted, hours = totals["repositories"], totals["hours_of_the_day"]
+              text = [f"## Velocity Radar count for {totals['login']}", "",
+                      f"Counted through **{totals['counted_through']}** (complete UTC days), from {totals['since']}, "
+                      f"in {counted['read']} repositories, {counted['private']} of them private, "
+                      f"{counted['could_not_read']} not readable."]
+              text += table(totals["windows"])
+              if totals["longest"]:
+                  text += ["", f"### Round the clock, last 365 days ({totals['clock']}): substantive commits, and any commit"]
+                  text += table([{"longest": name.replace("_", ", "), **{k: v for k, v in found.items() if k not in CHART_ONLY}}
+                                 for name, found in totals["longest"].items()])
+                  text += ["", f"Days with a substantive commit: {hours['days']}. The middle day had one in "
+                           f"{hours['median_hours_a_day']:g} different hours. "
+                           "Days with one in at least 8, 12, 16, 20 and 24 hours: "
+                           + ", ".join(map(str, hours["days_with_at_least"].values())) + "."]
+              if hours.get("bands"):
+                  text += ["", "### Day, evening, overnight: substantive commits"]
+                  text += table(hours["bands"]) + table([hours["nights"]])
+              elif totals["longest"]:
+                  text += ["", "_No time zone was given, so there is no day, evening and overnight split, and hours are UTC._"]
+              return "\n".join(text + ["", "**Nothing was sent.** Sending is not open yet."]) + "\n"
+
+          def hand_on(totals):
+              """Passes the totals to job 2. A job can pass on 1 MB: beyond that the line counts are left out."""
+              pack = lambda: base64.b64encode(gzip.compress(json.dumps(totals, separators=(",", ":")).encode())).decode()
+              if len(pack()) > 900_000:
+                  totals["days"] = {day: {k: v for k, v in total.items() if k != "lines"} for day, total in totals["days"].items()}
+                  totals["line_counts_left_out"] = True
+              with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                  output.write("totals=" + pack() + "\n")
+
+          # ---- 5. THE RUN -------------------------------------------------------------------------------
+          def main():
+              """Reads, adds up, hands the totals to job 2 and shows them to you. Nothing else happens in this job."""
+              through = dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=1)       # complete days only
+              zone_name = os.environ.get("TIMEZONE", "").strip()
               try:
-                  from zoneinfo import ZoneInfo
-                  zone = ZoneInfo(os.environ["TIMEZONE"].strip())
+                  zone = ZoneInfo(zone_name) if zone_name else None
               except Exception:
-                  print(f"time zone {os.environ['TIMEZONE']!r} was not recognised, so the day, evening and overnight split is left out")
-          shown = (lambda t: t.astimezone(zone)) if zone else (lambda t: t)
+                  zone = None
+                  print(f"time zone {zone_name!r} was not recognised, so hours are shown in UTC")
+              clock = (lambda when: when.astimezone(zone)) if zone else (lambda when: when)
 
-          def runs(stamps, keep=3):
-              """The longest unbroken runs of clock hours that each hold at least one commit."""
-              per = collections.Counter(t.replace(minute=0, second=0, microsecond=0) for t in stamps); hrs = sorted(per)
-              if not hrs: return []
-              found, start = [], hrs[0]
-              for p, q in zip(hrs, hrs[1:] + [None]):
-                  if q is None or q - p != dt.timedelta(hours=1): found.append((start, p)); start = q
-              found.sort(key=lambda ab: (-(ab[1] - ab[0]), ab[0])); out = []
-              for a, b in found[:keep]:
-                  n = int((b - a).total_seconds() // 3600) + 1; each = [per[a + dt.timedelta(hours=i)] for i in range(n)]
-                  out.append({"hours": n, "from": shown(a).strftime("%Y-%m-%d %H:00"), "to": shown(b + dt.timedelta(hours=1)).strftime("%Y-%m-%d %H:00"),
-                              "commits": sum(each), "fewest_in_an_hour": min(each), "median_in_an_hour": statistics.median(each),
-                              "per_hour": each[:120], "first_hour_of_day": shown(a).hour})
-              return out
+              login, since, commits, counted = read_commits(through)
+              year = [c for c in commits if c.day >= (through - dt.timedelta(days=364)).isoformat()]
+              substantive = [c for c in year if c.kind == "substantive"]
+              totals = {"schema": 3, "method_version": METHOD_VERSION, "login": login, "since": since,
+                        "counted_through": through.isoformat(), "repositories": counted, "clock": zone_name if zone else "UTC",
+                        "windows": window_table(commits, through), "longest": {}, "hours_of_the_day": {},
+                        "days": totals_by_day(commits)}
+              if substantive:
+                  totals["longest"] = {"run_substantive": longest_run(substantive, clock), "run_any": longest_run(year, clock),
+                                       "stretch_substantive": longest_stretch(substantive, clock),
+                                       "stretch_any": longest_stretch(year, clock)}
+                  totals["hours_of_the_day"] = hours_of_the_day(substantive, clock, zone is not None)
+              hand_on(totals)
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as page:
+                  page.write(summary(totals))
+              print(f"{login}: {len(commits):,} commits counted through {through}. Nothing sent anywhere.")
 
-          def stretches(stamps, longest_break=120, keep=3):
-              """The longest stretches of commits in which no break between two commits is longer than longest_break minutes."""
-              ts = sorted(stamps)
-              if not ts: return []
-              found, start, n, worst, over = [], ts[0], 1, 0.0, 0
-              for p, q in zip(ts, ts[1:] + [None]):
-                  gap = None if q is None else (q - p).total_seconds() / 60
-                  if q is None or gap > longest_break: found.append((start, p, n, worst, over)); start, n, worst, over = q, 1, 0.0, 0
-                  else: n += 1; worst = max(worst, gap); over += gap > 60
-              found.sort(key=lambda x: (-(x[1] - x[0]), x[0]))
-              return [{"hours": round((b - a).total_seconds() / 3600, 1), "from": shown(a).strftime("%Y-%m-%d %H:%M"), "to": shown(b).strftime("%Y-%m-%d %H:%M"), "commits": n,
-                       "longest_break_minutes": round(worst), "breaks_over_an_hour": over} for a, b, n, worst, over in found[:keep]]
-
-          subs = [c for c in year if c[1] == "s"]
-          per_day = collections.defaultdict(set)
-          for c in subs: per_day[shown(c[3]).date()].add(shown(c[3]).hour)
-          spread = sorted(len(v) for v in per_day.values())
-          hours = {"clock": os.environ["TIMEZONE"].strip() if zone else "UTC",
-                   "runs_substantive": runs([c[3] for c in subs]), "runs_any_commit": runs([c[3] for c in year]),
-                   "longest_break_allowed_minutes": 120, "stretches_substantive": stretches([c[3] for c in subs]), "stretches_any_commit": stretches([c[3] for c in year]),
-                   "days_with_a_substantive_commit": len(spread), "median_hours_a_day": statistics.median(spread) if spread else None,
-                   "days_with_hours": {str(k): sum(1 for x in spread if x >= k) for k in (8, 12, 16, 20, 24)}}
-          if zone and subs:
-              by_hour = collections.Counter(shown(c[3]).hour for c in subs); n = len(subs)
-              bands = (("day", "07:00 to 18:00", list(range(7, 18))), ("evening", "18:00 to 23:00", list(range(18, 23))), ("overnight", "23:00 to 07:00", [23, 0, 1, 2, 3, 4, 5, 6]))
-              hours["profile_24"] = [round(by_hour[h] / n, 4) for h in range(24)]
-              hours["bands"] = [{"band": b, "hours": label, "commits": sum(by_hour[h] for h in hs), "share": round(sum(by_hour[h] for h in hs) / n, 3),
-                                 "share_per_hour": round(sum(by_hour[h] for h in hs) / n / len(hs), 4)} for b, label, hs in bands]
-              nights = collections.defaultdict(set)
-              for c in subs:
-                  t = shown(c[3])
-                  if t.hour >= 23: nights[t.date()].add(t.hour)
-                  elif t.hour < 7: nights[t.date() - dt.timedelta(days=1)].add(t.hour)
-              hours["nights"] = {"with_a_commit": len(nights), "with_4_or_more_of_the_8_hours": sum(1 for v in nights.values() if len(v) >= 4), "with_all_8_hours": sum(1 for v in nights.values() if len(v) == 8)}
-
-          def middle(xs): return round(statistics.median(xs)) if len(xs) >= 10 else None
-          sizes = []
-          for span in (30, 90, 180, 365):
-              a = (through - dt.timedelta(days=span - 1)).isoformat(); sel = [c for c in seen.values() if a <= c[0] <= through.isoformat() and c[1] == "s" and c[2] is not None]
-              pub = [c[2] for c in sel if not c[4]]
-              sizes.append({"days": span, "all": middle([c[2] for c in sel]), "all_commits": len(sel), "public_only": middle(pub), "public_commits": len(pub)})
-
-          totals = {"schema": 2, "method_version": METHOD_VERSION, "hours": hours, "sizes": sizes, "login": login, "since": since[:10], "counted_through": through.isoformat(),
-                    "repositories": {"read": len(repos) - unread, "private": sum(1 for r in repos if r["isPrivate"]), "could_not_read": unread},
-                    "days": {k: days[k] for k in sorted(days)}}
-          packed = base64.b64encode(gzip.compress(json.dumps(totals, separators=(",", ":")).encode())).decode()
-          if len(packed) > 900_000:            # a job can hand on 1 MB: keep each day's median instead of every line count
-              for v in totals["days"].values(): v["median_lines"] = statistics.median(v["lines"]) if v["lines"] else None; v.pop("lines")
-              totals["lines_reduced_to_daily_median"] = True
-              packed = base64.b64encode(gzip.compress(json.dumps(totals, separators=(",", ":")).encode())).decode()
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f: f.write("totals=" + packed + "\n")
-          n = sum(v["s"] + v["m"] + v["a"] + v["u"] for v in totals["days"].values())
-          print(f"{login}: {n:,} commits on {len(totals['days'])} days in {len(repos) - unread} repositories, counted through {through}. Totals handed to the next job; nothing sent anywhere.")
+          main()
           PY
 
   witness:
-    name: Witness (no token, shows the totals, sends nothing)
+    name: Witness (never sees your token, sends nothing)
     needs: count
     runs-on: ubuntu-latest
     permissions:
       id-token: write
     steps:
-      - name: Show the totals and what GitHub vouches for
+      - name: Show what GitHub would vouch for about this run
         env:
           TOTALS: ${{ needs.count.outputs.totals }}
         run: |
           python3 - <<'PY'
-          import base64, datetime as dt, gzip, json, os, statistics, urllib.request
+          import base64, json, os, urllib.request
 
-          totals = json.loads(gzip.decompress(base64.b64decode(os.environ["TOTALS"])))
-          days = totals["days"]; end = dt.date.fromisoformat(totals["counted_through"])
-          rows = []
-          for span in (30, 90, 180, 365):
-              a = (end - dt.timedelta(days=span - 1)).isoformat(); sel = [v for k, v in days.items() if a <= k <= end.isoformat()]
-              lines = [x for v in sel for x in v.get("lines", [])]
-              rows.append((span, sum(v["s"] + v["m"] + v["a"] + v["u"] for v in sel), sum(v["s"] for v in sel), sum(v["m"] for v in sel),
-                           sum(v["a"] for v in sel), sum(v["u"] for v in sel), statistics.median(lines) if len(lines) >= 10 else None))
+          VOUCHED = ("repository", "actor", "job_workflow_ref", "job_workflow_sha", "runner_environment", "aud")
 
-          # What GitHub would sign about this run. The token itself is never printed; only what it says.
-          claims = {}
-          try:
-              req = urllib.request.Request(os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=https://velocity.id8.one",
-                                           headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
-              part = json.load(urllib.request.urlopen(req, timeout=30))["value"].split(".")[1]
-              claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
-          except Exception as e:
-              claims = {"note": f"no signed run token was issued ({type(e).__name__}); your own file needs 'id-token: write' under permissions"}
-          vouched = {k: claims.get(k) for k in ("repository", "actor", "job_workflow_ref", "job_workflow_sha", "runner_environment", "aud", "note") if claims.get(k)}
+          def signed_claims():
+              """Asks GitHub for a signed token about this run and returns what it says. The token itself is never shown."""
+              request = urllib.request.Request(os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=https://velocity.id8.one",
+                                               headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
+              payload = json.load(urllib.request.urlopen(request, timeout=30))["value"].split(".")[1]
+              return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
 
-          out = [f"## Velocity Radar count for {totals['login']}", "",
-                 f"Counted through **{totals['counted_through']}** (complete UTC days), from {totals['since']}, in {totals['repositories']['read']} repositories "
-                 f"({totals['repositories']['private']} private" + (f", {totals['repositories']['could_not_read']} could not be read" if totals['repositories']['could_not_read'] else "") + ").", "",
-                 "| last | commits | substantive | merges | automated | micro | median lines, substantive |", "|---|---|---|---|---|---|---|"]
-          out += [f"| {s} days | {n:,} | {sub:,} | {m:,} | {a:,} | {u:,} | {'' if med is None else round(med)} |" for s, n, sub, m, a, u, med in rows]
-          H, Z = totals.get("hours") or {}, totals.get("sizes") or []
-          def run_line(r): return (f"**{r['hours']} hours in a row**, {r['from']} to {r['to']} ({H.get('clock')}): {r['commits']:,} commits, "
-                                   f"never fewer than {r['fewest_in_an_hour']} in an hour, {r['median_in_an_hour']:g} in the middle hour")
-          if H.get("runs_substantive"):
-              out += ["", "### Round the clock, last 365 days", "",
-                      "The longest unbroken run of clock hours that each hold a **substantive** commit: " + run_line(H["runs_substantive"][0]) + ".", "",
-                      "Counting a commit of **any kind**: " + run_line(H["runs_any_commit"][0]) + ".", "",
-                      "| next longest, substantive | commits | fewest in an hour |", "|---|---|---|"]
-              out += [f"| {r['hours']} hours, {r['from']} to {r['to']} | {r['commits']:,} | {r['fewest_in_an_hour']} |" for r in H["runs_substantive"][1:]]
-              def stretch_line(x): return (f"**{x['hours']:g} hours**, {x['from']} to {x['to']}: {x['commits']:,} commits, longest break {x['longest_break_minutes']} minutes, "
-                                           f"{x['breaks_over_an_hour']} break{'s' if x['breaks_over_an_hour'] != 1 else ''} over an hour")
-              if H.get("stretches_substantive"):
-                  out += ["", f"The longest stretch with no break longer than {H['longest_break_allowed_minutes'] // 60} hours between **substantive** commits: " + stretch_line(H["stretches_substantive"][0]) + ".", "",
-                          "Between commits of **any kind**: " + stretch_line(H["stretches_any_commit"][0]) + "."]
-              d = H["days_with_hours"]
-              out += ["", f"On {H['days_with_a_substantive_commit']} days with a substantive commit, the middle day had one in {H['median_hours_a_day']:g} different hours. "
-                          f"Days with one in 8 or more hours: {d['8']}; 12 or more: {d['12']}; 16 or more: {d['16']}; 20 or more: {d['20']}; all 24: {d['24']}."]
-          if H.get("bands"):
-              out += ["", f"### Day, evening, overnight ({H['clock']}), substantive commits", "", "| band | hours | commits | share | share per hour of the band |", "|---|---|---|---|---|"]
-              out += [f"| {b['band']} | {b['hours']} | {b['commits']:,} | {b['share']:.0%} | {b['share_per_hour']:.1%} |" for b in H["bands"]]
-              n = H["nights"]; out += ["", f"Nights with an overnight commit: {n['with_a_commit']}; with one in 4 or more of the 8 overnight hours: {n['with_4_or_more_of_the_8_hours']}; in all 8: {n['with_all_8_hours']}."]
-          elif H: out += ["", "_No time zone was given, so the day, evening and overnight split is left out. Hours above are UTC._"]
-          if Z:
-              out += ["", "### Median lines of a substantive commit: all your repositories against your public ones", "", "| last | all repositories | commits | public only | commits |", "|---|---|---|---|---|"]
-              out += [f"| {z['days']} days | {'' if z['all'] is None else z['all']} | {z['all_commits']:,} | {'' if z['public_only'] is None else z['public_only']} | {z['public_commits']:,} |" for z in Z]
-          out += ["", "**Nothing was sent.** Sending is not open yet. These totals stayed inside this run.", "",
-                  "What GitHub would vouch for about this run:", "", "```", json.dumps(vouched, indent=1), "```"]
-          text = "\n".join(out); print(text)
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f: f.write(text + "\n")
+          def main():
+              """Shows what GitHub would sign about this run, and that the totals arrived. Sends nothing."""
+              try:
+                  claims = {name: value for name, value in signed_claims().items() if name in VOUCHED}
+              except Exception as problem:
+                  claims = {"note": f"no signed run token ({type(problem).__name__}): your own file needs 'id-token: write'"}
+              text = (f"## What GitHub would vouch for about this run\n\n```\n{json.dumps(claims, indent=1)}\n```\n\n"
+                      f"The totals reached this job ({len(os.environ['TOTALS']):,} characters, packed) and **nothing was sent**.\n")
+              print(text)
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as page:
+                  page.write(text)
+
+          main()
           PY
