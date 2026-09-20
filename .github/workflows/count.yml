@@ -1,0 +1,171 @@
+# Velocity Radar count. This one file is all of the code that runs in your account.
+#
+# What it does: asks GitHub for the commits YOU authored on the default branch of the repositories your
+# token can read, and adds them up by day. For each commit it asks for five things only: its id, its date,
+# the first line of its message, how many lines it added and removed, and how many parents it has.
+# It never asks for a file, a diff or a full commit message, and it uses no outside actions or packages.
+#
+# What leaves the first job: totals by day. No repository names, no commit ids, no message text.
+# What leaves your account today: NOTHING. Sending is not open yet; the second job only shows the totals
+# and shows what GitHub would vouch for about this run. When sending opens it will be a new released
+# version of this file, and you would have to change the pinned commit id in your own file to use it.
+#
+# Two jobs on purpose. "count" holds your token and has no way to ask GitHub for a signed run token.
+# "witness" can ask for that signed run token and never sees your token.
+name: Velocity Radar count
+
+on:
+  workflow_call:
+    secrets:
+      RADAR_TOKEN:
+        description: A read-only, short-lived fine-grained token for the repositories you chose
+        required: true
+
+jobs:
+  count:
+    name: Count (holds your token, sends nothing)
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      totals: ${{ steps.count.outputs.totals }}
+    steps:
+      - id: count
+        name: Add up commits by day
+        env:
+          RADAR_TOKEN: ${{ secrets.RADAR_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import base64, collections, datetime as dt, gzip, json, os, re, statistics, sys, time, urllib.error, urllib.request
+
+          METHOD_VERSION = 3          # the classifier below is the one in Velocity Radar's locked measures.py, version 3
+          AUTO = re.compile(r"^(chore|build|ci|release|bump|deploy|sync|publish|version|merge|revert|update (readme|deps|dependencies|changelog|lock)|\[?bot\]?|auto|evidence|logs?[:/]|test-?runs?|record(ed)? (run|evidence)|apply (formatting|prettier|fmt)|regenerat|prepare release|v?\d+\.\d+\.\d+)", re.I)
+          MICRO = re.compile(r"^(wip|x+|\.+|fix|update|tweak|tmp|test|stuff|more|misc|changes?|save)$", re.I)
+          DAYS_BACK = 730
+
+          def kind(is_merge, subject):
+              s = (subject or "").strip()
+              if is_merge: return "m"                      # merge commit
+              if AUTO.search(s): return "a"                # automated by its subject line: chores, releases, test records
+              if len(s) <= 3 or MICRO.match(s): return "u"  # micro: "wip", "fix", "."
+              return "s"                                   # everything else
+
+          TOKEN = os.environ.get("RADAR_TOKEN") or sys.exit("RADAR_TOKEN is empty: add the token as a repository secret with that name")
+
+          def ask(query, **variables):
+              body = json.dumps({"query": query, "variables": variables}).encode()
+              for attempt in range(5):
+                  req = urllib.request.Request("https://api.github.com/graphql", data=body,
+                                               headers={"Authorization": "Bearer " + TOKEN, "User-Agent": "velocity-radar-count"})
+                  try:
+                      with urllib.request.urlopen(req, timeout=90) as r: out = json.load(r)
+                  except urllib.error.HTTPError as e:
+                      if e.code in (401, 403) and attempt == 0 and "rate limit" not in (e.read() or b"").decode("utf8", "replace").lower():
+                          sys.exit(f"GitHub refused the token (HTTP {e.code}). Check that it has not expired and has Contents: Read-only.")
+                      time.sleep(15 * (attempt + 1)); continue
+                  except Exception:
+                      time.sleep(15 * (attempt + 1)); continue
+                  if out.get("data") is not None: return out["data"], out.get("errors")
+                  time.sleep(15 * (attempt + 1))
+              return None, [{"message": "no answer after five tries"}]
+
+          me, err = ask("{ viewer { id login } }")
+          if not me: sys.exit(f"could not read the token's owner: {err}")
+          uid, login = me["viewer"]["id"], me["viewer"]["login"]
+
+          REPOS = """query($after:String){ viewer { repositories(first:100, after:$after, ownerAffiliations:OWNER, isFork:false) {
+            pageInfo{ hasNextPage endCursor } nodes{ nameWithOwner isPrivate defaultBranchRef{ name } } } } }"""
+          HISTORY = """query($owner:String!,$name:String!,$uid:ID!,$since:GitTimestamp!,$after:String){
+            repository(owner:$owner,name:$name){ defaultBranchRef{ target{ ... on Commit {
+              history(first:100, author:{id:$uid}, since:$since, after:$after){ pageInfo{ hasNextPage endCursor }
+                nodes{ oid authoredDate messageHeadline SIZES parents{ totalCount } } } } } } } }"""
+
+          repos, after = [], None
+          while True:
+              d, err = ask(REPOS, after=after)
+              if not d: sys.exit(f"could not list repositories: {err}")
+              page = d["viewer"]["repositories"]; repos += [r for r in page["nodes"] if r.get("defaultBranchRef")]
+              if not page["pageInfo"]["hasNextPage"]: break
+              after = page["pageInfo"]["endCursor"]
+
+          today = dt.datetime.now(dt.timezone.utc).date(); through = today - dt.timedelta(days=1)      # complete days only
+          since = (today - dt.timedelta(days=DAYS_BACK)).isoformat() + "T00:00:00Z"
+          seen, unread = {}, 0
+          for r in repos:
+              owner, name = r["nameWithOwner"].split("/", 1); after = None; with_sizes = True
+              while True:
+                  d, err = ask(HISTORY.replace("SIZES", "additions deletions" if with_sizes else ""), owner=owner, name=name, uid=uid, since=since, after=after)
+                  if not d and with_sizes: with_sizes = False; continue        # a very large repository: read it again without line counts
+                  if not d: unread += 1; break
+                  h = ((((d.get("repository") or {}).get("defaultBranchRef") or {}).get("target") or {}).get("history")) or {}
+                  for n in h.get("nodes") or []:
+                      if n["oid"] in seen: continue                             # the same commit in two repositories counts once
+                      day = dt.datetime.fromisoformat(n["authoredDate"].replace("Z", "+00:00")).astimezone(dt.timezone.utc).date()
+                      size = None if n.get("additions") is None else n["additions"] + n["deletions"]
+                      seen[n["oid"]] = (day.isoformat(), kind(n["parents"]["totalCount"] > 1, n.get("messageHeadline")), size)
+                  if not (h.get("pageInfo") or {}).get("hasNextPage"): break
+                  after = h["pageInfo"]["endCursor"]
+
+          days = collections.defaultdict(lambda: {"s": 0, "m": 0, "a": 0, "u": 0, "lines": []})
+          for day, k, size in seen.values():
+              if day > through.isoformat(): continue
+              days[day][k] += 1
+              if k == "s" and size is not None: days[day]["lines"].append(size)
+          for v in days.values(): v["lines"].sort()
+
+          totals = {"schema": 1, "method_version": METHOD_VERSION, "login": login, "since": since[:10], "counted_through": through.isoformat(),
+                    "repositories": {"read": len(repos) - unread, "private": sum(1 for r in repos if r["isPrivate"]), "could_not_read": unread},
+                    "days": {k: days[k] for k in sorted(days)}}
+          packed = base64.b64encode(gzip.compress(json.dumps(totals, separators=(",", ":")).encode())).decode()
+          if len(packed) > 900_000:            # a job can hand on 1 MB: keep each day's median instead of every line count
+              for v in totals["days"].values(): v["median_lines"] = statistics.median(v["lines"]) if v["lines"] else None; v.pop("lines")
+              totals["lines_reduced_to_daily_median"] = True
+              packed = base64.b64encode(gzip.compress(json.dumps(totals, separators=(",", ":")).encode())).decode()
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f: f.write("totals=" + packed + "\n")
+          n = sum(v["s"] + v["m"] + v["a"] + v["u"] for v in totals["days"].values())
+          print(f"{login}: {n:,} commits on {len(totals['days'])} days in {len(repos) - unread} repositories, counted through {through}. Totals handed to the next job; nothing sent anywhere.")
+          PY
+
+  witness:
+    name: Witness (no token, shows the totals, sends nothing)
+    needs: count
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Show the totals and what GitHub vouches for
+        env:
+          TOTALS: ${{ needs.count.outputs.totals }}
+        run: |
+          python3 - <<'PY'
+          import base64, datetime as dt, gzip, json, os, statistics, urllib.request
+
+          totals = json.loads(gzip.decompress(base64.b64decode(os.environ["TOTALS"])))
+          days = totals["days"]; end = dt.date.fromisoformat(totals["counted_through"])
+          rows = []
+          for span in (30, 90, 180, 365):
+              a = (end - dt.timedelta(days=span - 1)).isoformat(); sel = [v for k, v in days.items() if a <= k <= end.isoformat()]
+              lines = [x for v in sel for x in v.get("lines", [])]
+              rows.append((span, sum(v["s"] + v["m"] + v["a"] + v["u"] for v in sel), sum(v["s"] for v in sel), sum(v["m"] for v in sel),
+                           sum(v["a"] for v in sel), sum(v["u"] for v in sel), statistics.median(lines) if len(lines) >= 10 else None))
+
+          # What GitHub would sign about this run. The token itself is never printed; only what it says.
+          claims = {}
+          try:
+              req = urllib.request.Request(os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=https://velocity.id8.one",
+                                           headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
+              part = json.load(urllib.request.urlopen(req, timeout=30))["value"].split(".")[1]
+              claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+          except Exception as e:
+              claims = {"note": f"no signed run token was issued ({type(e).__name__}); your own file needs 'id-token: write' under permissions"}
+          vouched = {k: claims.get(k) for k in ("repository", "actor", "job_workflow_ref", "job_workflow_sha", "runner_environment", "aud", "note") if claims.get(k)}
+
+          out = [f"## Velocity Radar count for {totals['login']}", "",
+                 f"Counted through **{totals['counted_through']}** (complete UTC days), from {totals['since']}, in {totals['repositories']['read']} repositories "
+                 f"({totals['repositories']['private']} private" + (f", {totals['repositories']['could_not_read']} could not be read" if totals['repositories']['could_not_read'] else "") + ").", "",
+                 "| last | commits | substantive | merges | automated | micro | median lines, substantive |", "|---|---|---|---|---|---|---|"]
+          out += [f"| {s} days | {n:,} | {sub:,} | {m:,} | {a:,} | {u:,} | {'' if med is None else round(med)} |" for s, n, sub, m, a, u, med in rows]
+          out += ["", "**Nothing was sent.** Sending is not open yet. These totals stayed inside this run.", "",
+                  "What GitHub would vouch for about this run:", "", "```", json.dumps(vouched, indent=1), "```"]
+          text = "\n".join(out); print(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f: f.write(text + "\n")
+          PY
