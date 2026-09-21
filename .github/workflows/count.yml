@@ -26,7 +26,7 @@ on:
         required: false
         default: ""
     secrets:
-      RADAR_TOKEN:
+      VELOCITY_RADAR_TOKEN:
         description: A read-only, short-lived fine-grained token for the repositories you chose
         required: true
 
@@ -41,7 +41,7 @@ jobs:
       - id: count
         name: Add up your commits
         env:
-          RADAR_TOKEN: ${{ secrets.RADAR_TOKEN }}
+          VELOCITY_RADAR_TOKEN: ${{ secrets.VELOCITY_RADAR_TOKEN }}
           TIMEZONE: ${{ inputs.timezone }}
         run: |
           python3 - <<'PY'
@@ -63,7 +63,7 @@ jobs:
                    "overnight, 23:00 to 07:00": OVERNIGHT}
           HOUR = dt.timedelta(hours=1)
           CHART_ONLY = ("per_hour", "first_hour_of_day")    # handed on so a chart can be drawn, left out of the tables
-          TOKEN = os.environ.get("RADAR_TOKEN") or sys.exit("RADAR_TOKEN is empty: add the token as a secret with that name")
+          TOKEN = os.environ.get("VELOCITY_RADAR_TOKEN") or sys.exit("VELOCITY_RADAR_TOKEN is empty: add the token as a secret with that name")
           Commit = collections.namedtuple("Commit", "day kind lines when private")
 
           # ---- 2. READING FROM GITHUB -------------------------------------------------------------------
