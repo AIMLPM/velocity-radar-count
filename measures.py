@@ -36,6 +36,10 @@ Version 6 changes two figures in section 7, both the owner's decisions of 23 Sep
 break longer than three hours, not two (LONGEST_BREAK). The run keeps its count of clock hours but is also measured
 from its first commit to its last, as the stretch is, so that the two read on the same scale and the stretch, which
 allows the longer break, is never the shorter figure. Each stretch also says which break it allowed.
+
+Version 7 changes no figure and no function. This file and method/golden.json are published in the count's public
+repository, so they no longer name the people whose public figures some golden cases were taken from: a comment here
+and the notes of seven cases say "person A" to "person E" instead. Their arguments and outputs are unchanged.
 """
 import collections
 import datetime as dt
@@ -43,7 +47,7 @@ import re
 import statistics
 import statistics as st
 
-METHOD_VERSION = 6
+METHOD_VERSION = 7
 
 # ---------------------------------------------------------------------------------------------------------------
 # 1. Rates over a window                                                     source: windows.py rate()
@@ -85,7 +89,7 @@ def substantive_rate(public_rate, substantive_share):
 
     KNOWN DEFECT (kept through version 4): the pipeline passes the UNROUNDED sample share here but publishes the
     share rounded to three decimals, so for 14 of 468 people on 18 Sep 2026 the two published numbers do not
-    multiply to the published result (steipete: 232.0 x 0.839 = 194.6, published 194.5)."""
+    multiply to the published result (one of them: 232.0 x 0.839 = 194.6, published 194.5)."""
     return round(public_rate * substantive_share, 1)
 
 

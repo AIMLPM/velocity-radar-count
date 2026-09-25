@@ -22,10 +22,11 @@ Velocity Radar's formulas are one file, [`measures.py`](measures.py). Since the 
 2. It runs every golden case with GitHub's Python and stops if any gives another answer.
 3. Only then does it read from GitHub and count.
 
-The run prints which formulas ran, for example `method version 6 · measures.py sha256 e3c5d308… · 82 of 82 golden cases passed`. The `measures.py` beside this README is the same file: `sha256sum measures.py` prints the same hash.
+The run prints which formulas ran, for example `method version 7 · measures.py sha256 dd00dae0… · 82 of 82 golden cases passed`. The `measures.py` beside this README is the same file: `sha256sum measures.py` prints the same hash.
 
 | release | method version | measures.py sha256 |
 |---|---|---|
+| 7 | 7 | `dd00dae0fc187c2c71394b6f23705ee63a26a04b5ddcd87e8abbcc007bc10c9f` (no figure changes: no names in measures.py or the golden cases, and two comments in count.yml) |
 | 6 | 6 | `e3c5d30838954f7f5fd6a5df4c3868be5bd02b297f21f956ee46892ce8238aed` |
 | 5 | 5 | `bd8bd1f71e4c0bd1fca8582979ce592cd857ccb53aad968c4a72585f0fd3bd65` (built, never published: release 6 came first) |
 | 1 to 4 | — | the count did its own arithmetic; only the two classifier patterns were copied from measures.py |

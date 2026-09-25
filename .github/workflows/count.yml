@@ -95,6 +95,10 @@ jobs:
           break longer than three hours, not two (LONGEST_BREAK). The run keeps its count of clock hours but is also measured
           from its first commit to its last, as the stretch is, so that the two read on the same scale and the stretch, which
           allows the longer break, is never the shorter figure. Each stretch also says which break it allowed.
+
+          Version 7 changes no figure and no function. This file and method/golden.json are published in the count's public
+          repository, so they no longer name the people whose public figures some golden cases were taken from: a comment here
+          and the notes of seven cases say "person A" to "person E" instead. Their arguments and outputs are unchanged.
           """
           import collections
           import datetime as dt
@@ -102,7 +106,7 @@ jobs:
           import statistics
           import statistics as st
 
-          METHOD_VERSION = 6
+          METHOD_VERSION = 7
 
           # ---------------------------------------------------------------------------------------------------------------
           # 1. Rates over a window                                                     source: windows.py rate()
@@ -144,7 +148,7 @@ jobs:
 
               KNOWN DEFECT (kept through version 4): the pipeline passes the UNROUNDED sample share here but publishes the
               share rounded to three decimals, so for 14 of 468 people on 18 Sep 2026 the two published numbers do not
-              multiply to the published result (steipete: 232.0 x 0.839 = 194.6, published 194.5)."""
+              multiply to the published result (one of them: 232.0 x 0.839 = 194.6, published 194.5)."""
               return round(public_rate * substantive_share, 1)
 
 
@@ -704,7 +708,7 @@ jobs:
           MEASURES_PY
           cat > "$RUNNER_TEMP/velocity-radar/method/golden.json" <<'GOLDEN_JSON'
           {
-           "method_version": 6,
+           "method_version": 7,
            "cases": [
             {
              "fn": "estimate",
@@ -740,7 +744,7 @@ jobs:
             },
             {
              "fn": "estimate",
-             "note": "commit share measured in public (teknium1, 18 Sep 2026)",
+             "note": "commit share measured in public (person A, 18 Sep 2026)",
              "args": {
               "substantive_share": 0.796,
               "margin": 0.016,
@@ -772,7 +776,7 @@ jobs:
             },
             {
              "fn": "estimate",
-             "note": "commit share measured in public (steipete, 18 Sep 2026)",
+             "note": "commit share measured in public (person B, 18 Sep 2026)",
              "args": {
               "substantive_share": 0.839,
               "margin": 0.015,
@@ -804,7 +808,7 @@ jobs:
             },
             {
              "fn": "estimate_approximate",
-             "note": "nothing public to sample (QC-L, 18 Sep 2026)",
+             "note": "nothing public to sample (person C, 18 Sep 2026)",
              "args": {
               "public_commits": 13,
               "private_contributions": 104441,
@@ -834,7 +838,7 @@ jobs:
             },
             {
              "fn": "estimate_approximate",
-             "note": "nothing public to sample (lubosxyz, 18 Sep 2026)",
+             "note": "nothing public to sample (person D, 18 Sep 2026)",
              "args": {
               "public_commits": 15,
               "private_contributions": 72947,
@@ -986,7 +990,7 @@ jobs:
             },
             {
              "fn": "substantive_rate",
-             "note": "unrounded share, as the pipeline passes it (steipete)",
+             "note": "unrounded share, as the pipeline passes it (person B)",
              "args": {
               "public_rate": 232.0,
               "substantive_share": 0.8385
@@ -1447,7 +1451,7 @@ jobs:
             },
             {
              "fn": "window_estimate",
-             "note": "teknium1, 30 days to 18 Sep 2026: mostly public commits and a low commit share, which is applied to the private count only (version 2 applied it to the public commits too and showed 71.0)",
+             "note": "person A, 30 days to 18 Sep 2026: mostly public commits and a low commit share, which is applied to the private count only (version 2 applied it to the public commits too and showed 71.0)",
              "args": {
               "substantive_share": 0.796,
               "commit_share": 0.386,
@@ -1465,7 +1469,7 @@ jobs:
             },
             {
              "fn": "window_estimate",
-             "note": "simonw, 30 days to 18 Sep 2026",
+             "note": "person E, 30 days to 18 Sep 2026",
              "args": {
               "substantive_share": 0.809,
               "commit_share": 0.747,
@@ -8110,7 +8114,7 @@ jobs:
              "added": "2026-09-23"
             }
            ],
-           "outputs_recomputed": "2026-09-23"
+           "outputs_recomputed": "2026-09-24"
           }
           GOLDEN_JSON
           python3 - <<'PY'
@@ -8120,9 +8124,9 @@ jobs:
 
           # ---- 1. SETTINGS ------------------------------------------------------------------------------
           # The sha256 of the two files written above. Nothing in them runs until both match.
-          METHOD_VERSION = 6
-          MEASURES_SHA256 = "e3c5d30838954f7f5fd6a5df4c3868be5bd02b297f21f956ee46892ce8238aed"
-          GOLDEN_SHA256 = "8683b344f47d30cccc4276c56c9a9d7b36ce5ff639f23fb0224aac515d3c73c6"
+          METHOD_VERSION = 7
+          MEASURES_SHA256 = "dd00dae0fc187c2c71394b6f23705ee63a26a04b5ddcd87e8abbcc007bc10c9f"
+          GOLDEN_SHA256 = "b611aa16a63b71fe07271c7604c6200bf5ff0f20735cde804484379aec0c6766"
           DAYS_BACK = 730                           # how far back commits and the contribution calendar are read
           PACKED_MAX = 900_000                      # job 2 can be handed 1 MB; Velocity Radar reads at most this much
           UNPACKED_MAX = 8_000_000
@@ -8374,6 +8378,9 @@ jobs:
       id-token: write
     steps:
       - name: Show what GitHub would vouch for about this run
+        # TOTALS is here so that it is written into the log: GitHub prints a step's environment at the top of the step's
+        # log, and that one "TOTALS: <packed totals>" line is what Check my run reads back if you press it. This job only
+        # prints the packed totals' length; it decodes nothing and sends nothing.
         env:
           TOTALS: ${{ needs.count.outputs.totals }}
         run: |
@@ -8383,7 +8390,9 @@ jobs:
           VOUCHED = ("repository", "actor", "job_workflow_ref", "job_workflow_sha", "runner_environment", "aud")
 
           def signed_claims():
-              """Asks GitHub for a signed token about this run and returns what it says. The token itself is never shown."""
+              """Asks GitHub's own endpoint on this runner (ACTIONS_ID_TOKEN_REQUEST_URL) for a signed token about this run
+              and returns what it says. https://velocity.id8.one is only the audience written into the token, the name of
+              who it would be for: no request goes to velocity.id8.one. The token itself is never shown."""
               request = urllib.request.Request(os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=https://velocity.id8.one",
                                                headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
               payload = json.load(urllib.request.urlopen(request, timeout=30))["value"].split(".")[1]
